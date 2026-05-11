@@ -1,7 +1,7 @@
 {
   "name": "discord-breach-bot",
-  "version": "1.0.0",
-  "description": "Discord bot for Oathnet breach lookups",
+  "version": "2.0.0",
+  "description": "Discord bot with global commands for Oathnet breach lookups",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -11,6 +11,6 @@
     "axios": "^1.6.0"
   },
   "engines": {
-    "node": ">=16.11.0"
+    "node": ">=18.0.0"
   }
 }
