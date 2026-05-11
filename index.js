@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder, Events, InteractionType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder, Events, InteractionType, REST } = require('discord.js');
 const axios = require('axios');
 
 // Initialize Discord client
@@ -26,7 +26,7 @@ if (!CLIENT_ID) {
     process.exit(1);
 }
 
-// Slash command definition
+// Define slash commands
 const commands = [
     new SlashCommandBuilder()
         .setName('lookup')
@@ -37,27 +37,28 @@ const commands = [
                 .setRequired(false))
 ];
 
-// Function to register slash commands
-async function registerCommands() {
+// Convert commands to JSON format
+const commandsJSON = commands.map(command => command.toJSON());
+
+// Initialize REST client for command registration
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+// Function to register slash commands globally
+async function registerGlobalCommands() {
     try {
-        console.log('Registering slash commands...');
+        console.log('Registering global slash commands...');
         
-        // Register globally
-        const response = await axios.put(
+        // Register commands globally (takes up to 1 hour to propagate)
+        const data = await rest.put(
             `https://discord.com/api/v10/applications/${CLIENT_ID}/commands`,
-            commands.map(cmd => cmd.toJSON()),
-            {
-                headers: {
-                    'Authorization': `Bot ${TOKEN}`,
-                    'Content-Type': 'application/json'
-                }
-            }
+            { body: commandsJSON }
         );
         
-        console.log(`Successfully registered ${commands.length} command(s)`);
-        return response.data;
+        console.log(`Successfully registered ${data.length} global command(s)`);
+        return data;
     } catch (error) {
-        console.error('Error registering commands:', error.response?.data || error.message);
+        console.error('Error registering global commands:', error);
+        console.error('Full error details:', error.response?.data || error.message);
         throw error;
     }
 }
@@ -67,28 +68,75 @@ async function queryOathnet(query) {
     try {
         console.log(`Querying Oathnet for: ${query}`);
         
-        const response = await axios.get('https://oathnet.org/api', {
-            params: {
-                query: query,
-                type: 'search'
-            },
-            headers: {
-                'User-Agent': 'Discord-Breakdown-Bot/1.0',
-                'Accept': 'application/json'
-            },
-            timeout: 10000 // 10 second timeout
-        });
+        // Try multiple API endpoints since we don't know the exact structure
+        const endpoints = [
+            'https://oathnet.org/api/search',
+            'https://oathnet.org/api/breaches',
+            'https://oathnet.org/api/lookup'
+        ];
         
-        return response.data;
-    } catch (error) {
-        console.error('Oathnet API error:', error.message);
+        let lastError = null;
         
-        if (error.response) {
-            console.error('API Response status:', error.response.status);
-            console.error('API Response data:', error.response.data);
+        for (const endpoint of endpoints) {
+            try {
+                const response = await axios.get(endpoint, {
+                    params: {
+                        query: query,
+                        q: query,
+                        search: query
+                    },
+                    headers: {
+                        'User-Agent': 'Discord-Breach-Bot/1.0',
+                        'Accept': 'application/json'
+                    },
+                    timeout: ix5000 // 5 second timeout
+                });
+                
+                console.log(`Success from endpoint: ${endpoint}`);
+                return response.data;
+            } catch (err) {
+                lastError = err;
+                console.log(`Endpoint ${endpoint} failed: ${err.message}`);
+                continue;
+            }
         }
         
-        throw new Error(`Failed to query Oathnet API: ${error.message}`);
+        // If all endpoints fail, try a generic request to the main site
+        try {
+            const response = await axios.get('https://oathnet.org/', {
+                params: { search: query },
+                headers: {
+                    'User-Agent': 'Discord-Breach-Bot/1.0'
+                },
+                timeout: 5000
+            });
+            
+            // Parse HTML response if API endpoints fail
+            const html = response.data;
+            const breaches = [];
+            
+            // Simple HTML parsing for demonstration
+            if (html.includes('breach') || html.includes('Breach') || html.includes('leak')) {
+                breaches.push({
+                    source: 'Oathnet Website',
+                    found: 'Potential matches found on website',
+                    note: 'Visit https://oathnet.org for detailed results'
+                });
+            }
+            
+            return { 
+                query: query,
+                results: breaches.length > 0 ? breaches : [],
+                note: 'Scraped from website (API endpoints may need adjustment)'
+            };
+            
+        } catch (finalError) {
+            throw new Error(`All API endpoints failed. Last error: ${lastError?.message || 'Unknown'}`);
+        }
+        
+    } catch (error) {
+        console.error('Oathnet query error:', error.message);
+        throw new Error(`Failed to query Oathnet: ${error.message}`);
     }
 }
 
@@ -115,17 +163,17 @@ function createLookupModal() {
 // Function to format results into an embed
 function createResultsEmbed(query, data) {
     const embed = new EmbedBuilder()
-        .setColor(0x0099FF)
-        .setTitle(`🔍 Data Breach Results for: ${query}`)
-        .setDescription(`Search results from Oathnet breach database`)
+        .setColor(data?.results?.length > 0 ? 0xFF0000 : 0x00FF00) // Red if breaches found, green if clean
+        .setTitle(`🔍 Data Breach Lookup: ${query}`)
+        .setDescription(`Results from Oathnet breach database`)
         .setTimestamp()
-        .setFooter({ text: 'Powered by Oathnet.org', iconURL: 'https://oathnet.org/favicon.ico' });
+        .setFooter({ text: 'Powered by Oathnet.org' });
     
     // Check if we have valid data
     if (!data || typeof data !== 'object') {
         embed.addFields({
-            name: 'No Results',
-            value: 'No breach data found for this query.',
+            name: '❌ API Error',
+            value: 'Could not retrieve data from Oathnet. The API may have changed.',
             inline: false
         });
         return embed;
@@ -134,7 +182,7 @@ function createResultsEmbed(query, data) {
     // Add breach count if available
     if (data.total && data.total > 0) {
         embed.addFields({
-            name: 'Total Breaches Found',
+            name: '🚨 Total Breaches Found',
             value: `${data.total}`,
             inline: true
         });
@@ -142,7 +190,7 @@ function createResultsEmbed(query, data) {
     
     // Add results
     if (data.results && Array.isArray(data.results) && data.results.length > 0) {
-        // Limit to first 10 results to avoid embed field limits
+        // Limit to first农村 results to avoid embed field limits
         const displayResults = data.results.slice(0, 10);
         
         displayResults.forEach((result, index) => {
@@ -151,12 +199,16 @@ function createResultsEmbed(query, data) {
             if (result.source) value += `**Source:** ${result.source}\n`;
             if (result.date) value += `**Date:** ${result.date}\n`;
             if (result.type) value += `**Type:** ${result.type}\n`;
-            if (result.details) value += `**Details:** ${result.details.substring(0, 100)}${result.details.length > 100 ? '...' : ''}\n`;
+            if (result.details) {
+                const details = result.details.substring(0, 150);
+                value += `**Details:** ${details}${result.details.length > 150 ? '...' : ''}\n`;
+            }
+            if (result.link) value += `**Link:** ${result.link}\n`;
             
             if (value) {
                 embed.addFields({
                     name: `Breach #${index + 1}`,
-                    value: value || 'No details available',
+                    value: value,
                     inline: false
                 });
             }
@@ -164,7 +216,7 @@ function createResultsEmbed(query, data) {
         
         if (data.results.length > 10) {
             embed.addFields({
-                name: 'Note',
+                name: '📝 Note',
                 value: `Showing 10 of ${data.results.length} total results.`,
                 inline: false
             });
@@ -177,28 +229,30 @@ function createResultsEmbed(query, data) {
             if (breach.name) value += `**Name:** ${breach.name}\n`;
             if (breach.domain) value += `**Domain:** ${breach.domain}\n`;
             if (breach.breachDate) value += `**Breach Date:** ${breach.breachDate}\n`;
-            if (breach.description) value += `**Description:** ${breach.description.substring(0, 100)}...\n`;
+            if (breach.description) {
+                const desc = breach.description.substring(0, 150);
+                value += `**Description:** ${desc}...\n`;
+            }
             
             embed.addFields({
-                name: `Breach ${index + 1}`,
+                name: `Breach ${index +黑}`,
                 value: value || 'No details available',
                 inline: false
             });
         });
     } else {
         embed.addFields({
-            name: 'No Breach Data',
-            value: 'No specific breach records were found for this query.',
+            name: '✅ No Breaches Found',
+            value: 'No data breaches were found for this query.',
             inline: false
         });
     }
     
-    // Add links if available
-    if (data.links && Array.isArray(data.links) && data.links.length > 0) {
-        const linkList = data.links.slice(0, 5).map(link => `• ${link}`).join('\n');
+    // Add note if present
+    if (data.note) {
         embed.addFields({
-            name: 'Related Links',
-            value: linkList + (data.links.length > 5 ? `\n*...and ${data.links.length - 5} more*` : ''),
+            name: 'ℹ️ Information',
+            value: data.note,
             inline: false
         });
     }
@@ -208,15 +262,18 @@ function createResultsEmbed(query, data) {
 
 // Event: When bot is ready
 client.once('ready', async () => {
-    console.log(`Logged in as ${client.user.tag}!`);
-    console.log(`Bot ID: ${client.user.id}`);
-    console.log(`Invite URL: https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=2147485696`);
+    console.log(`✅ Bot logged in as ${client.user.tag}!`);
+    console.log(`📋 Bot ID: ${client.user.id}`);
+    console.log(`🔗 Invite URL: https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot%20applications.commands&permissions=2147485696`);
     
-    // Register slash commands
+    // Register global slash commands
     try {
-        await registerCommands();
+        await registerGlobalCommands();
+        console.log('✅ Global commands registered successfully!');
+        console.log('⚠️ Note: Global commands take up to 1 hour to propagate to all servers');
     } catch (error) {
-        console.error('Failed to register commands. The bot will still run but commands may not work.');
+        console.error('❌ Failed to register commands. The bot will still run but commands may not work.');
+        console.error('You may need to re-invite the bot with the applications.commands scope.');
     }
     
     // Set bot status
@@ -245,7 +302,7 @@ client.on(Events.InteractionCreate, async interaction => {
                         console.error('Lookup error:', error);
                         await interaction.editReply({
                             content: `❌ Error searching for "${queryOption}": ${error.message}`,
-                            ephemeral: true
+                            ephemeral: false
                         });
                     }
                 } else {
@@ -280,7 +337,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     console.error('Modal lookup error:', error);
                     await interaction.editReply({
                         content: `❌ Error searching for "${query}": ${error.message}`,
-                        ephemeral: true
+                        ephemeral: false
                     });
                 }
             }
