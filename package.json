@@ -1,13 +1,16 @@
 {
-  "name": "discord-bot",
+  "name": "discord-breach-bot",
   "version": "1.0.0",
+  "description": "Discord bot for Oathnet breach lookups",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.15.3",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "discord.js": "^14.14.1",
+    "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=16.11.0"
   }
 }
